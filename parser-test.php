@@ -4,24 +4,25 @@ include('monadic-parser.php');
 $s='1+2*2+3';
 
 
-$number=new Token('/[0-9]+/');
-$plus=new Token('/\+/');
-$times=new Token('/\*/');
-$openbrace=new Token('/\(/');
-$closebrace=new Token('/\)/');
+$number=new Token('number', '[0-9]+');
+$plus=new Token('+', '\\+');
+$times=new Token('*', '\\*');
+$openbrace=new Token('(', '\\(');
+$closebrace=new Token(')', '\\)');
 
-$simple_array = array($number);
-$simple = new Any($simple_array,'simple');
+$simplex = new Any('simple', array($number));
 
-$sum_array=array();
-$sum=new Chain($sum_array, 'sum');
-$sum_array+=array($simple,$plus, $sum);
+$product=new Chain('product', array($simplex, $times));
+$productx = new Any('productx', array($product, $simplex));
+$product->append(array($productx));
 
-$product_array=array();
-$product=new Chain($product_array, 'product');
-$product_array+=array($sum,$times, $product);
+$sum = new Chain('sum', array($productx, $plus));
+$sumx = new Any('sumx', array($sum, $productx));
+$sum->append(array($sumx));
 
-$expression=$product;
-$simple_array[]= array($openbrace, $expression, $closebrace);
+//$braced = new Chain('braced', array($openbrace, $productx, $closebrace));
+//$simplex->append(array($braced));
 
-print_r($expression->parsestring($s));
+$expression = $sumx;
+
+print_r($expression->parseall(new SimpleInputMapper($s), new SimpleASTMapper1()));

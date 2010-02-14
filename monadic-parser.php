@@ -3,144 +3,198 @@
 #see http://sandersn->com/blog//index->php/2009/07/01/monadic_parsing_in_python_part_3
 
 #todo:
-# add exception property to parseresult
+# lexer cache
+# compile regex
+# parser factory
+# ast creation with collback by name of structure
+# serialization of parser
 # put in ast result class as dom object
-# make stateful parsebuffer object via clone
-# remove $lexer
 # insert namespace
-# use list() = instead of parseresult
+# factor out record-factory?
+# think about backtracking and more than 1 result
 
-function ast_result($type, $value){
-  return array('type'=>$type, 'vaule'=>$value);
+interface InputMapper {
+  function __construct($s, $i=0);
+  function eof();
+  function lex($pattern);
 }
 
-class Ast{
-  function add_token($type, $value){
-  }
-  function add_structure($type, $value, $content){
-  }
-  function dump() {
-  }
-}
-class ParseBuffer{
-  function __construct($s){
+class SimpleInputMapper implements InputMapper {
+  function __construct($s, $i=0) {
     $this->s=$s;
-    $this->i=0;
+    $this->i=$i;
   }
-  function eof(){
+  function eof() {
     return ($this->i == strlen($this->s));
   }
-  function match($pattern){
-    if(preg_match($pattern, $this->s, $matches, 0, $this->i)){
-      $this->i += strlen($matches[0]);
-      return $matches[0];
+  function lex($pattern) {
+    static $cache = array();
+    $cache_index = "{$this->i}:$pattern";
+    if(array_key_exists($cache_index, $cache)):
+      print"Cache hit!\n";
+      list($success, $result) = $cache[$cache_index];
+    else:
+      $success = preg_match("/^$pattern/", substr($this->s, $this->i), $matches);
+      $result = $matches[0];
+      $cache[$cache_index] = array($success, $result);
+    endif;
+
+    if($success){
+      return new ParserResult(new SimpleInputMapper($this->s, $this->i+strlen($result)), $result, False);
     } else {
-      return new Exception("ParseBuffer could not match at {$this->i}.");
+      $message = "{$this->i}# $name". substr($this->s,$this->i,10)."...\n";
+      return new ParserResult($this, NULL, $message);
     }
   }
 }
 
-class ParseResult{
-  function __construct(ParseBuffer $buffer, $answer){
-    $this->buffer = $buffer;
-    $this->answer = $answer;
+interface ASTMapper {
+  function atom($name, $value);
+  function struct($name, $value);
+  function tree($value);
+}
+
+class SimpleASTMapper implements ASTMapper {
+  function atom($name, $value) {
+    return array('struct'=>0, 'name'=>$name, 'value'=>$value);
+  }
+  function struct($name, $value) {
+    return array('struct'=>1, 'name'=>$name, 'value'=>$value);
+  }
+  function tree($value) {
+    return $value;
+  }
+}
+
+class SimpleASTMapper1 implements ASTMapper {
+  function atom($name, $value) {
+    return $value;
+  }
+  function struct($name, $value) {
+    return "$name(".join(',',$value).")";
+  }
+  function tree($value) {
+    return $value."\n";
+  }
+}
+
+class ParserResult{
+  function __construct(InputMapper $input, $ast_fragment, $fail){
+    $this->input = $input;
+    $this->ast_fragment= $ast_fragment;
+    $this->fail = $fail;
   }
 }
 
 abstract class Parser{
-  function __construct(Lexer $lexer){
-    $this->lexer = $lexer;
-  }
-  abstract function parse(ParseBuffer $buffer);
-  function parsestring($s){
-    $result = $this->parse(new ParseBuffer($s));
-    if($result->answer instanceof Exception){ 
-      throw $result->answer;
-    } elseif($result->buffer->eof()) {
-      return $result->answer;
+  abstract function parse(SimpleInputMapper $input, ASTMapper $astmapper);
+  function parseall(SimpleInputMapper $input, ASTMapper $astmapper){
+    $result = $this->parse($input, $astmapper);
+    if($result->fail){ 
+      throw new Exception("Parser Fail: ".print_r($result));
+    } elseif($result->input->eof()) {
+      return $astmapper->tree($result->ast_fragment);
     } else {
-      throw new Exception("Parser did not reach EOF, only {$result->buffer->i}");
+      throw new Exception("Parser did not reach EOF!\n".print_r($result));
     }
   }
 }
 
-
 class Token extends Parser{
-  function __construct($pattern, $type = 'Token'){
-    $this->type = $type;
+  function __construct($name, $pattern){
+    $this->name = $name;
     $this->pattern = $pattern;
+    return $this;
   }
-  function parse(ParseBuffer $buffer){
-    $token = $buffer->match($this->pattern);
-    if($token instanceof Exception){
-      return new ParseResult($buffer, $token);
-    } else {
-      return new ParseResult($buffer, ast_result($this->type, $token));
-    }
+  function parse(SimpleInputMapper $input, ASTMapper $astmapper){
+    print "{$input->i}? {$this->name}\n";
+    $result = $input->lex($this->pattern, $astmapper, $this->name);
+    if($result->fail):
+      print "{$input->i}# {$this->name}\n";
+    else:
+      print "{$input->i}! {$this->name}\n";
+    endif;
+    return new ParserResult($result->input, $astmapper->atom($name, $result->ast_fragment), $result->fail);
   }
 }
 
 class Chain extends Parser{
-  function __construct(&$parsers, $type = 'Chain'){
-    $this->type = $type;
+  function __construct($name, $parsers){
+    $this->name = $name;
     assert(is_array($parsers));
     foreach($parsers as $parser){
       assert($parser instanceof Parser);
     }
-    $this->parsers = &$parsers;
+    $this->parsers = $parsers;
+    return $this;
   }
-  function parse(ParseBuffer $buffer){
+  function append($parsers) {
+    $this->parsers = array_merge($this->parsers, $parsers);
+  }
+  function parse(SimpleInputMapper $input, ASTMapper $astmapper){
+    print "{$input->i}? {$this->name}\n";
     $value = array();
     foreach($this->parsers as $parser){
-      $result = $parser->parse($buffer);
-      if($result->answer instanceof Exception){
-        break;
-      }
-      $buffer = $result->buffer;
-      $value[] = $result->answer;
+      $result = $parser->parse($input, $astmapper);
+      if($result->fail):
+        print "{$input->i}# {$this->name}\n";
+        return $result;
+      endif;
+      $input = $result->input;
+      $value[] = $result->ast_fragment;
     }
-    return new ParseResult($buffer, ast_result($this->type,$value));
+    print "{$input->i}! {$this->name}\n";
+    return new ParserResult($input, $astmapper->struct($this->name, $value), FALSE);
   }
 }
 
-class Lift extends Parser{
-  function __construct($parser1, $f){
-    $this->parser1 = $parser1;
-    $this->f = $f;
-  }
-  function parse(ParseBuffer $buffer){
-    $result = $this->parser1->parse($buffer);
-    if ($result->answer instanceof Exception){
-    return new ParseResult($buffer, $result->answer);
-    } else {
-      return $this->f(a).parse($buffer);
-    }
-  }
-}
-class Rtrn extends Parser{
-  function __construct($x){
-    $this->x = $x;
-  }
-  function parse(ParseBuffer $buffer){
-    return new ParseResult($buffer, $this->x);
-  }
-}
 class Any extends Parser{
-  function __construct(&$parsers, $type = 'Any'){
-    $this->type = $type;
+  function __construct($name, $parsers){
+    $this->name = $name;
     assert(is_array($parsers));
     foreach($parsers as $parser){
       assert($parser instanceof Parser);
     }
-    $this->parsers = &$parsers;
+    $this->parsers = $parsers;
+    return $this;
   }
-  function parse(ParseBuffer $buffer){
+  function append($parsers) {
+    $this->parsers = array_merge($this->parsers, $parsers);
+  }
+  function parse(SimpleInputMapper $input, ASTMapper $astmapper){
+    print "{$input->i}? {$this->name}\n";
     foreach($this->parsers as $parser){
-      $result = $parser->parse($buffer);
-      if (!($result->answer instanceof Exception)){
-        break;
-      }
+      $result = $parser->parse($input, $astmapper);
+      if (!$result->fail):
+        print "{$input->i}! {$this->name}\n";
+        return $result;
+      endif;
     }
-    return new ParseResult($result->buffer, ast_result($this->type,$value));
+    print "{$input->i}# {$this->name}\n";
+    return $result;
   }
 }
+
+class Multiple extends Parser{
+  function __construct($name, $parser){
+    $this->name = $name;
+    assert($parser instanceof Parser);
+    $this->parser = $parser;
+    return $this;
+  }
+  function parse(SimpleInputMapper $input, ASTMapper $astmapper){
+    print "{$input->i}? {$this->name}\n";
+    $result = new ParserResult($input, array(), False);
+    while(1) {
+      $newresult = $parser->parse($result->input, $astmapper);
+      if ($newresult->fail){
+        break;
+      }
+      $astvalue[] = $result->ast_fragment;
+      $result = $newresult;
+    }
+    print "{$input->i}".$result->fail?'#':'!'." {$this->name}\n";
+    return $result;
+  }
+}
+
